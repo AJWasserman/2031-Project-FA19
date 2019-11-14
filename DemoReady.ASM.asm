@@ -8,7 +8,7 @@
 ; The ISR jump table is located in mem 0-4.  See manual for details.
 ORG 0
 	JUMP   Init        ; Reset vector
-	RETI               ; Sonar interrupt (unused)
+	RETI ; Sonar interrupt (unused)
 	JUMP   CTimer_ISR  ; Timer interrupt
 	RETI               ; UART interrupt (unused)
 	RETI               ; Motor stall interrupt (unused)
@@ -24,7 +24,7 @@ Init:
 	OUT    RVELCMD
 	STORE  DVel        ; Reset API variables
 	STORE  DTheta
-	OUT    SONAREN     ; Disable sonar (optional)
+	;OUT    SONAREN     ; Disable sonar (optional)
 	OUT    BEEP        ; Stop any beeping (optional)
 	
 	CALL   SetupI2C    ; Configure the I2C to read the battery voltage
@@ -73,45 +73,320 @@ Main:
 	; code in that ISR will attempt to control the robot.
 	; If you want to take manual control of the robot,
 	; execute CLI &B0010 to disable the timer interrupt.
+	
+	;******************************************************************************
+	;* Read starting position target from switches
+	;******************************************************************************
+	IN SWITCHES ; Read dip switches for target offset
+	;AND &B0111 ; Mask to keep just the bottom 3 bits (8 possible starting heights)
+	STORE StartY  ; Store to a variable for use later	
+	
+	; Find offset to get to desired start height
+	LOAD StartY
+	ADDI -3 ; Subtract 3
+	STORE StartOffset
+	
+	; Jump to proper execution sequence 
+	LOAD StartOffset
+	JPOS StartLeft ; Start poitions less than 3 require turning right
+	JNEG StartRight ; Start positions greater than 3 require turning left 
+	JUMP MainTraverse ; If start height is default height, begin main loop
+	
 
-; Enable sensor 5 and 0 TODO: REMOVE AFTER MERGE
-LOADI 33
-OUT SONAREN
+;************************************************************************************
+;* LEFT STARTING OFFSET
+;************************************************************************************	
+StartLeft:
+	; Turn left
+	IN Theta
+	ADDI 90
+	STORE DTheta
+	
+	; Loops to calculate target distance of travel using starting offset
+	LOADI 0 ; Set initial target distance to zero
+	STORE TargetDistance
+	LOADI 0 ; Stop driving
+	STORE Dvel
+LeftTargetLoop:
+	LOAD TargetDistance
+	ADDI 294 ;Increase target by 1 foot
+	STORE TargetDistance
+	LOAD StartOffset
+	ADDI -1 ; Move one closer to no offset
+	STORE StartOffset
+	JPOS LeftTargetLoop	
 
-; TEST PROGRAM FOR CICLING a REFLECTOR USING SENSOR 0/5
-LOADI -90
-STORE LOR
-CALL CIRCLE
-CALL InfLoop
+	; Moves to calculated target
+	LOAD FMid
+	STORE Dvel
+LCont:	
+	IN YPOS
+	SUB TargetDistance
+	JNEG LCont	
+	LOADI 0
+	STORE Dvel
+	
+	; Turn right back to original heading
+	IN Theta
+	ADDI -90
+	STORE DTheta
+	
+	CALL Wait
+	;Move to main program
+	JUMP MainTraverse
+	
+	
+;************************************************************************************************
+;*RIGHT STARTING OFFSET
+;************************************************************************************************
+StartRight:
+	; Turn right
+	IN Theta
+	ADDI -90
+	STORE DTheta
+	
+	;;Loops to calculate target distance of travel using starting offset
+	LOADI 0
+	STORE TargetDistance
+	LOADI 0
+	STORE Dvel
+RightTargetLoop:
+	LOAD TargetDistance
+	ADDI 294 ;Increase target by 1 foot
+	STORE TargetDistance
+	LOAD StartOffset
+	ADDI 1
+	STORE StartOffset
+	JPOS RightTargetLoop	
 
+	;;Moves to calculated target
+	LOAD FMid
+	STORE Dvel
+RCont:	
+	IN YPOS
+	ADD TargetDistance
+	JPOS RCont	
+	LOADI 0
+	STORE Dvel
+	
+	; Turn left back to original heading 
+	IN Theta
+	ADDI 90
+	STORE DTheta
+	
+	CALL Wait
+	;Move to main program
+	JUMP MainTraverse
+	
+
+Wait:
+	LOADI 0
+	OUT TIMER
+WaitLoop:
+	IN TIMER
+	ADDI -20
+	OUT SSEG2
+	JNEG WaitLoop
+	RETURN
+;**************************************************************************************
+;*MAIN TRAVERSING LOOP
+;**************************************************************************************s
+	
+MainTraverse:
+	;Enable sonars 0 and 5 (left and right sides)
+	LOADI &B00101101
+	OUT SONAREN
+
+	;Setup sonar alarm register ditsance to 3 feet
+	LOAD Ft3
+	OUT SONALARM
+
+	;; Drive slowly across the field
+	LOADI 275 ;FSLOW 250
+	STORE Dvel
+	
+	
+	IN DIST2
+	ADDI -275 ;-147
+	JNEG Die ;AvoidCollision
+	
+	IN DIST3
+	ADDI -275 ;-147
+	JNEG Die ;AvoidCollision
+	
+	;; Check for a reflector on right
+	IN SONALARM
+	AND Mask5
+	OUT SSEG2
+	JPOS RightRef
+	
+	;; Check for a reflector on left
+	IN SONALARM
+	AND Mask0
+	OUT SSEG2
+	JPOS LeftRef
+	JUMP NoReflector 
+	
+;*******************************************************************
+;* Sequence for when a reflector is spotted to the right
+;*******************************************************************
+RightRef:
+; init check
+	IN DIST5
+	ADDI -175 ; ;;too close to attempt
+	JNEG MainTraverse
+	
+	IN DIST5
+	ADDI -400 ;-586
+	JNEG RRStop
+
+	;Turn to face target
+	IN Theta
+	ADDI -90
+	STORE DTheta
+;;Moves to calculated target
+	LOAD FSlow
+	STORE Dvel
+RApproach:	
+	IN DIST2
+	ADDI -325 ;-586
+	JPOS RApproach
+RTurn:
+	IN Theta
+	ADDI 90
+	STORE DTheta
+	JUMP RRStop
+
+
+
+RRStop:
+	LOADI 0
+	STORE Dvel
+	
+	LOADI -90
+	STORE LOR
+	CALL CIRCLE
+	
+	LOADI 0
+	STORE Dvel
+	
+	JUMP MainTraverse ;CHANGED
+
+;*******************************************************************
+;* Sequence for when a reflector is spotted to the left
+;*******************************************************************	
+LeftRef:
+; init check	
+	IN DIST0
+	ADDI -175 ;;too close to attempt
+	JNEG LLStop
+
+	IN DIST0
+	ADDI -400 
+	JNEG LLStop
+	
+	;Turn to face target
+	IN Theta
+	ADDI 90
+	STORE DTheta
+;;Moves to calculated target
+	LOAD FSlow
+	STORE Dvel
+LApproach:	
+	IN DIST3
+	ADDI -325 ;-586
+	JPOS LApproach
+LTurn:
+	IN Theta
+	ADDI -90
+	STORE DTheta
+	JUMP LLStop
+
+LLStop:
+	LOADI 0
+	STORE Dvel
+	
+	LOADI 90
+	STORE LOR
+	CALL CIRCLE
+	
+	LOADI 0
+	STORE Dvel
+	
+	JUMP MainTraverse ;CHANGED
+	
+NoReflector:
+	JUMP MainTraverse
+	
+	
+	
+		
+;
+; AVOID COLIISION
+;
+AvoidCollision:
+	IN Theta
+	ADDI 90
+	STORE DTheta
+	
+	IN YPOS
+	ADDI -293
+	STORE collTemp
+	
+	LOAD FSlow
+	STORE Dvel
+	
+CollMove:
+	IN YPOS
+	SUB collTemp
+	JNEG CollMove
+	
+	LOADI 0
+	STORE Dvel
+	
+	IN Theta
+	ADDI -90
+	STORE DTheta
+	
+	RETURN
+	
+	
+	
+;;
+;; FARZAM AND wILL
+;;
+	
 ; Function for circling a reflector
 ; Usage:
 ; save either -90 or 90 into variable 'LOR'
 ; 90  corresponds to sensor 0 (CCW)
 ; -90 corresponds to sensor 5 (CW)
 CIRCLE:
+	CALL Wait
     LOAD LOR
     JPOS READSENSOR0
     JNEG READSENSOR5
 
 READSENSOR0:
-	IN DIST0
-	OUT SSEG1
-	ADDI -512 ; 0x200 because within 1.5 feet it can even be larger numbers
-	JPOS READSENSOR0
+	;IN DIST0
+	;OUT SSEG1
+	;ADDI -512 ; 0x200 because within 1.5 feet it can even be larger numbers
+	;JPOS READSENSOR0
 	
 	IN DIST0 ; Read sensor 0
 	; Saving sensor 0
+	ADDI 50
 	STORE SENRadius
 	JUMP STARTPROCESS ; to avoid reading sensor5
 	
 READSENSOR5:
-    IN DIST5
-	OUT SSEG1
-	ADDI -512 ; 0x200 because within 1.5 feet it can even be larger numbers
-	JPOS READSENSOR5
+    ;IN DIST5
+	;OUT SSEG1
+	;ADDI -512 ; 0x200 because within 1.5 feet it can even be larger numbers
+	;JPOS READSENSOR5
 	
 	IN DIST5 ; Read sensor 5
+	ADDI 50
 	; Saving sensor 5
 	STORE SENRadius
 
@@ -126,7 +401,7 @@ STARTPROCESS:
 	STORE XPOSInitial
 	
 	; Start moving forward
-	LOAD FMid
+	LOADI 200 ;FMid
 	STORE Dvel
 
 LoopHalfWay:
@@ -148,7 +423,7 @@ LoopHalfWay:
 	OUT SSEG1 ; DEBUG
 	
 	; Start moving forward
-	LOAD FMid
+	LOADI 200 ;FMid
 	STORE Dvel
 	
     ; This point is immediately after the first turn ; for sensor 0 (LOR = 90 i.e. CCW) we call FULlSUBYPOS, for sensor 5 (LOR = -90 i.e. CW) we call FUllSUBYNEG
@@ -172,7 +447,7 @@ Continue1:
 	STORE XPOSInitial
 	
 	; Start moving forward
-	LOAD FMid
+	LOADI 200 ;FMid
 	STORE Dvel
 	
 	CALL FULLSUBXPOS
@@ -188,7 +463,7 @@ Continue1:
 	;OUT SSEG1 ; DEBUG
 	
 	; Start moving forward
-	LOAD FMid
+	LOADI 200 ;FMid
 	STORE Dvel
 	
 	; for sensor 0 (LOR = 90 i.e. CC) we call FULlSUBYNEG, for sensor 5 (LOR = -90 i.e. CW) we call FUllSUBYPOS
@@ -215,13 +490,13 @@ Continue2:
 	OUT SSEG1 ; DEBUG
 	
 	; Start moving forward
-	LOAD FMid
+	LOADI 200 ;FMid
 	STORE Dvel
 	
 LoopFinal:
 	IN  XPOS ; Current
 	SUB XPOSInitial ; initial
-	SUB SENRadius ; radius (distance to travel)
+	SUB SENRadiusTwice ; radius (distance to travel)
 	
 	; if curr - intitial - radius = 0 we need to rotate 90 degrees
 	JNEG LoopFinal
@@ -231,9 +506,14 @@ LoopFinal:
 	STORE Dvel
 	
 	; Go back to pathway finder
+	CALL Wait
 	RETURN
 
-; FINISH
+;*****************************************************************************
+;*********************END OF GROUP ADDED CONTROL CODE*************************
+;*****************************************************************************
+
+
 InfLoop: 
 	JUMP   InfLoop
 	; note that the movement API will still be running during this
@@ -853,6 +1133,12 @@ XPOSInitial: 	 DW  0
 SENRadius:	 	 DW  0
 SENRadiusTwice:	 DW  0
 
+; Added by AJ
+StartY:			 DW	 0
+StartOffset:	 DW	 0
+TargetDistance:	 DW	 0
+collTemp:		 DW  0
+tempTime:		 DW  0
 ;***************************************************************
 ;* Constants
 ;* (though there is nothing stopping you from writing to these)
@@ -896,7 +1182,7 @@ Deg270:   DW 270       ; 270
 Deg360:   DW 360       ; can never actually happen; for math only
 FSlow:    DW 100       ; 100 is about the lowest velocity value that will move
 RSlow:    DW -100
-FMid:     DW 400       ; 350 is a medium speed
+FMid:     DW 350       ; 350 is a medium speed
 RMid:     DW -350
 FFast:    DW 500       ; 500 is almost max speed (511 is max)
 RFast:    DW -500
